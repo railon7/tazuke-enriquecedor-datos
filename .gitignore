@@ -1,0 +1,35 @@
+# Los datos del cliente no entran nunca en este repositorio.
+# Las pruebas crean sus ficheros en una carpeta temporal.
+*.csv
+*.tsv
+*.txt
+!requirements.txt
+*.xlsx
+*.xlsm
+*.xls
+*.ods
+*.json
+*.db
+*.sqlite
+limpio/
+salida/
+Bitacora-limpieza-*
+Enriquecimiento-*
+.cache-enriquecer.json
+propuestas/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Sistema, editor y OneDrive
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+*.tmp
+.tmp.driveupload/

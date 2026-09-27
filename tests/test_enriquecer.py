@@ -332,5 +332,18 @@ class Bdns(unittest.TestCase):
         self.assertFalse(any("bdnstrans" in u for u in red.preguntas))
 
 
+class NoEsMaestro(unittest.TestCase):
+    def test_listado_de_facturas_no_se_enriquece(self):
+        import pandas as pd
+        filas = [{"Factura": f"F{i}", "Cliente": f"Cliente Inventado {i % 5} SL", "Importe": "10"} for i in range(60)]
+        df = pd.DataFrame(filas)
+        red = RedFalsa()
+        r = ed.enriquecer(df, "F", "f.xlsx", ed.asignar_roles(list(df.columns), {"nombre": "Cliente"}), red,
+                          ed.Opciones())
+        self.assertEqual(r.propuestas, [])
+        self.assertTrue(any("No parece un maestro" in n for n in r.notas))
+        self.assertEqual(red.preguntas, [])
+
+
 if __name__ == "__main__":
     unittest.main()

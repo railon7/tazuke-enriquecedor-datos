@@ -112,7 +112,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 AGENTE = f"tazuke-enriquecedor/{VERSION} (+https://tazuke.com)"
 
 try:
@@ -929,6 +929,16 @@ def enriquecer(df, entidad: str, fichero: str, roles: dict, red: Red, op) -> Res
                      else "No se ha reconocido ninguna columna")
     if "nombre" not in roles and "nif" not in roles:
         res.notas.append("Sin columna de nombre ni de identificador: no se puede saber qué fila es una empresa")
+        return res
+    # Un listado de facturas también tiene nombre de cliente, pero repetido en
+    # cada documento: no es un maestro, y enriquecerlo es consultar cien veces
+    # lo mismo. Se reconoce porque los nombres se repiten.
+    clave = roles.get("nif") or roles["nombre"]
+    llenos = [str(v).strip() for v in df[clave] if not es_vacio(v)]
+    if len(llenos) > 20 and len(set(llenos)) / len(llenos) < 0.5:
+        res.notas.append(f"No parece un maestro: {len(set(llenos))} valores distintos de «{clave}» en "
+                         f"{len(llenos)} filas (una fila por documento). No se enriquece; se enriquece su maestro")
+        res.clases["no es un maestro"] = len(df)
         return res
 
     def v(fila, rol):

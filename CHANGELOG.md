@@ -1,5 +1,12 @@
 # Cambios
 
+## 1.1.1 · 2026-09-27
+
+- **Un listado de documentos no se enriquece.** Probado en un proyecto real,
+  trataba un listado de 958 facturas como un maestro de 584 «empresas»: el
+  nombre del cliente se repite en cada factura. Si los valores distintos no
+  llegan a la mitad de las filas, se salta con una nota
+
 ## 1.1.0 · 2026-09-27
 
 Sale de revisar extractores de *Impressum* alemanes, de *mentions légales*

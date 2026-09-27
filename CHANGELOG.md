@@ -1,5 +1,41 @@
 # Cambios
 
+## 1.1.0 · 2026-09-27
+
+Sale de revisar extractores de *Impressum* alemanes, de *mentions légales*
+francesas, extruct, las fuentes abiertas españolas y cómo empareja nombres la
+gente que más lo ha hecho (japoneses, chinos, rusos).
+
+- **VIES como verificador.** Para España no devuelve el nombre, pero compara
+  el que se le manda: cada CIF propuesto se confirma (alta) o se degrada
+  (baja). Con la forma jurídica abreviada, porque con «Sociedad Anónima» dice
+  que no. `--vies` comprueba también los CIF que ya hay
+- **`--bdns`: el CIF a partir del nombre**, en la Base de Datos Nacional de
+  Subvenciones. Tres filtros: todas las palabras enteras, la letra del CIF
+  cuadrando con la forma jurídica, y un único candidato claro. Probándolo,
+  «Inditex SA» salía como «BLINDITEX, S.L.» con un 87 % de parecido: por eso
+  los filtros. La BDNS busca por el principio de la frase y no casa la Ñ: se
+  le pregunta hasta la primera Ñ. Opcional, por su aviso legal
+- **La web por bloques**: el CIF del pie que firma la agencia no cuenta; el
+  del bloque con «Tomo, Folio, Hoja» o «titular» gana a los demás, y en la
+  misma línea pesa el doble que en la de al lado
+- **Un CIF o un teléfono en las webs de dos empresas del fichero** no se
+  propone: es de la agencia, del alojamiento o del grupo
+- **schema.org (JSON-LD)**: teléfono, CP y CIF que la web declara de sí misma
+- **Pestaña «Comprobaciones»**: letra del CIF frente a forma jurídica, prefijo
+  del fijo frente al CP, y lo que diga VIES de los CIF que ya hay
+- Rastreo: `Crawl-delay`, parar con un servidor que responde 429 o 503, y no
+  esquivar las protecciones contra robots (se anotan en el resumen)
+- Las páginas legales, también en catalán, gallego y euskera
+
+Probado contra un maestro real de 678 interlocutores (566 empresas), con
+`--vies --bdns`: 199 propuestas en 14 minutos (505 consultas a VIES a una por
+segundo). La BDNS encontró el CIF de 8 empresas que no lo tenían, 5 confirmados
+por VIES. Y una lección: **VIES solo reconoce la razón social casi completa**.
+111 de los 390 CIF que conoce no casaban con el nombre del maestro, casi todos
+por ser nombres comerciales o razones sociales recortadas. Por eso, para los
+CIF que ya hay, que VIES no case es un aviso y no un error.
+
 ## 1.0.0 · 2026-09-26
 
 Primera versión, sin tokens: fuentes públicas y gratuitas, y la propia web de

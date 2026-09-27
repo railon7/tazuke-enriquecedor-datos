@@ -35,11 +35,25 @@ DE DÓNDE SALE CADA DATO
 |                               | publicar NIF, razón social y domicilio en el    |     |
 |                               | aviso legal. Respetando su robots.txt           |     |
 | Web                           | El dominio de un correo que no sea genérico     | sí  |
-| Operador intracomunitario     | VIES, de la Comisión Europea (--vies)           | sí  |
+| CIF, teléfono, CP             | Lo que la web declara de sí misma en schema.org | sí  |
+|                               | (JSON-LD)                                       |     |
+| ¿Son suyos ese CIF y ese CP?  | VIES, de la Comisión Europea: compara el nombre | sí  |
+|                               | y el CP con los del CIF. Confirma o degrada     |     |
+|                               | cada CIF propuesto; con --vies, los que ya hay  |     |
+| CIF sin web ni correo propio  | La Base de Datos Nacional de Subvenciones       | sí  |
+|                               | (--bdns): quien ha recibido una ayuda pública   |     |
 
-La búsqueda de un CIF solo con el nombre, sin web ni correo propio, no está:
-no hay fuente oficial gratuita que lo dé. Va en una versión siguiente, con una
-API de búsqueda de cuota gratuita.
+Y sin salir del ordenador, la pestaña «Comprobaciones»: la letra del CIF
+frente a la forma jurídica del nombre, y el prefijo del teléfono fijo frente a
+la provincia del CP.
+
+CÓMO SABE QUE EL DATO ES DE ELLA
+--------------------------------
+Lee la web por bloques. El CIF del bloque que firma la agencia («Diseño web
+por…») no cuenta; el del bloque con «Tomo, Folio, Hoja» o «titular» es el del
+titular. Un CIF o un teléfono que sale en las webs de dos empresas del fichero
+es de la agencia, del alojamiento o del grupo, y no se propone. Y un nombre se
+empareja por palabras enteras: «Inditex» no es «Blinditex».
 
 USO
 ---
@@ -59,7 +73,11 @@ Opciones:
                                     Roles: nif, nombre, direccion, cp, poblacion,
                                     provincia, telefono, email, web
   --sin-red                         solo lo que no sale del ordenador
-  --vies                            comprobar cada CIF en VIES
+  --vies                            comprobar en VIES si el nombre y el CP son los de cada CIF
+  --bdns                            buscar en la Base de Datos Nacional de Subvenciones el CIF
+                                    de las empresas que no lo tienen ni lo dan en su web. Lee
+                                    antes su aviso legal: el acceso es abierto, pero pueden
+                                    restringirlo ante un uso abusivo
   --incluir-dudosos                 buscar también filas sin identificador ni forma
                                     jurídica (pueden ser personas: úsalo sabiendo)
   --simular                         cuenta lo que haría, sin escribir nada
@@ -83,6 +101,7 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import urllib.robotparser
@@ -93,7 +112,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 AGENTE = f"tazuke-enriquecedor/{VERSION} (+https://tazuke.com)"
 
 try:
@@ -107,7 +126,9 @@ CARPETA_ORIGEN = "02-datos-origen"
 
 CARTOCIUDAD = "https://www.cartociudad.es/geocoder/api/geocoder/candidatesJsonp"
 VIES = "https://ec.europa.eu/taxation_customs/vies/rest-api/ms/ES/vat/{}"
-PAUSA = {"cartociudad": 0.3, "web": 1.0, "vies": 0.5}
+VIES_COMPARA = "https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number"
+BDNS = "https://www.infosubvenciones.es/bdnstrans/api/terceros"
+PAUSA = {"cartociudad": 0.3, "web": 1.0, "vies": 1.0, "bdns": 1.0}
 
 LETRA_DNI = "TRWAGMYFPDXBNJZSQVHLCKE"
 TABLA_CIF = "JABCDEFGHI"
@@ -158,8 +179,20 @@ CORREO_GENERICO = {
     "terra.es", "ono.com", "orange.es", "vodafone.es", "protonmail.com", "gmx.com", "gmx.es",
     "aol.com", "wanadoo.es", "yandex.com", "mail.com",
 }
-ENLACES_LEGALES = re.compile(r"aviso[-_ ]?legal|legal|contact|privacidad|quienes|empresa|nosotros|about",
-                             re.I)
+# Las páginas donde está el NIF: la LSSI (art. 10) obliga a publicarlo. Con
+# las formas catalana, gallega y vasca, y las de las condiciones de uso.
+ENLACES_LEGALES = re.compile(r"aviso[-_ ]?legal|nota[-_ ]?legal|informacion[-_ ]?legal|avis[-_ ]?legal|"
+                             r"lege[-_ ]?oharra|legal|lssi|condiciones|terminos|contact|privacidad|quienes|"
+                             r"empresa|nosotros|about", re.I)
+# El pie que firma otra empresa: su CIF, su teléfono y su correo no son los de la web.
+RE_AGENCIA = re.compile(r"dise[ñn]o\s+(y\s+desarrollo\s+)?web|desarrollad[oa]\s+por|dise[ñn]ad[oa]\s+por|"
+                        r"powered\s+by|web\s+by|hecho\s+por|creado\s+por|realizad[oa]\s+por|"
+                        r"alojamiento\s+web|hosting|agencia\s+(de\s+)?(marketing|web)", re.I)
+# Señales de que el bloque identifica al titular de la web, que es lo que pide la LSSI.
+RE_TITULAR = re.compile(r"titular|responsable|raz[oó]n\s+social|denominaci[oó]n|datos\s+identificativos|"
+                        r"en\s+cumplimiento", re.I)
+RE_REGISTRO = re.compile(r"registro\s+mercantil|tomo\s*[:.]?\s*\d|folio\s*[:.]?\s*\d|hoja\s*[:.]?\s*[A-Z]{0,2}-?\d",
+                         re.I)
 
 RE_CIF_TEXTO = re.compile(r"(?<![A-Z0-9])([ABCDEFGHJNPQRSUVW])[\s.\-]?(\d{2})[\s.]?(\d{3})[\s.]?(\d{2})"
                           r"[\s.\-]?([0-9A-J])(?![A-Z0-9])")
@@ -377,6 +410,9 @@ class Red:
         self.robots = {}
         self._candado = threading.Lock()
         self._por_servidor = defaultdict(threading.Lock)
+        self.pausa_host = {}          # Crawl-delay que pide cada web
+        self.abandonados = set()      # servidores que han dicho 429 o 503
+        self.antibot = set()          # servidores con protección contra robots
         if cache_path and cache_path.exists():
             try:
                 self.cache = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -394,12 +430,16 @@ class Red:
         if not self.activa:
             return None
         host = urllib.parse.urlsplit(url).netloc
+        if host in self.abandonados:
+            return None
         with self._candado:
             candado_host = self._por_servidor[host]
             self.consultas[tipo] += 1
-        # Varias webs a la vez, pero nunca dos consultas a la misma.
+        # Varias webs a la vez, pero nunca dos consultas a la misma, y con la
+        # pausa que pida su robots.txt si es mayor que la nuestra.
         with candado_host:
-            espera = PAUSA.get(tipo, 1.0) - (time.monotonic() - self.ultima.get(host, 0))
+            pausa = max(PAUSA.get(tipo, 1.0), min(self.pausa_host.get(host, 0), 10))
+            espera = pausa - (time.monotonic() - self.ultima.get(host, 0))
             if espera > 0:
                 time.sleep(espera)
             try:
@@ -408,10 +448,38 @@ class Red:
                     crudo = r.read(max_bytes)
                     charset = r.headers.get_content_charset() or "utf-8"
                 return crudo.decode(charset, errors="replace")
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 503):
+                    # Nos pide que paremos: se para con ese servidor, no se insiste
+                    self.abandonados.add(host)
+                return None
             except Exception:
                 return None
             finally:
                 self.ultima[host] = time.monotonic()
+
+    def post_json(self, url: str, datos: dict, tipo: str) -> dict | None:
+        clave = "post:" + url + json.dumps(datos, sort_keys=True, ensure_ascii=False)
+        if clave not in self.cache:
+            if not self.activa:
+                return None
+            host = urllib.parse.urlsplit(url).netloc
+            with self._candado:
+                self.consultas[tipo] += 1
+            with self._por_servidor[host]:
+                espera = PAUSA.get(tipo, 1.0) - (time.monotonic() - self.ultima.get(host, 0))
+                if espera > 0:
+                    time.sleep(espera)
+                try:
+                    req = urllib.request.Request(url, data=json.dumps(datos).encode("utf-8"), method="POST",
+                                                 headers={"User-Agent": AGENTE, "Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        self.cache[clave] = json.loads(r.read().decode("utf-8"))
+                except Exception:
+                    return None          # un fallo de red no se guarda: se reintenta otro día
+                finally:
+                    self.ultima[host] = time.monotonic()
+        return self.cache[clave]
 
     def get(self, url: str, tipo: str, max_bytes: int = 600_000) -> str | None:
         if url not in self.cache:
@@ -428,8 +496,13 @@ class Red:
             if not self.activa:
                 return None
             html = self.descargar(url, "web")
+            if html is not None and RE_ANTIBOT.search(html[:20_000]) and len(texto_de_html(html)) < 3000:
+                # Una protección contra robots: no se intenta esquivar. Se deja.
+                self.antibot.add(urllib.parse.urlsplit(url).netloc)
+                html = None
             self.cache[clave] = None if html is None else {
                 "texto": texto_de_html(html)[:150_000],
+                "jsonld": organizaciones_jsonld(html)[:5],
                 # Solo los enlaces que pueden llevar a aviso legal o contacto, pero
                 # todos: el del aviso legal suele ser de los últimos de la página.
                 "enlaces": sorted({h for h in re.findall(r"""href=["']([^"'#]+)["']""", html, re.I)
@@ -446,6 +519,9 @@ class Red:
             texto = self.get(base + "/robots.txt", "web", 100_000)
             rp.parse((texto or "").splitlines())
             self.robots[base] = rp
+            demora = rp.crawl_delay(AGENTE) or rp.crawl_delay("*")
+            if demora:
+                self.pausa_host[partes.netloc] = float(demora)
         return self.robots[base].can_fetch(AGENTE, url)
 
 
@@ -507,6 +583,160 @@ def vies(red: Red, cif: str) -> bool | None:
         return None
 
 
+def consultas_bdns(nombre: str) -> list:
+    """Qué preguntarle a la BDNS. Busca la frase por su principio y no casa la
+    Ñ con la N: «TELEFONICA DE ESPA» encuentra y «TELEFONICA DE ESPAÑA» no. Se
+    pregunta por el nombre hasta su segunda palabra con peso, cortado antes de
+    la primera Ñ, y si no sale nada, por la primera palabra sola."""
+    vacias = {"DE", "DEL", "LA", "LAS", "LOS", "EL", "Y", "I", "E"}
+    trozos, con_peso = [], 0
+    for p in re.sub(r"[^A-ZÑ0-9 ]+", " ", sin_acentos(nombre.upper().replace("Ñ", "\0")).replace("\0", "Ñ")).split():
+        if p in LETRA_DE_FORMA or len(p) == 1:      # «S» de «S. A.»: empieza la forma jurídica
+            break
+        if "Ñ" in p:
+            if p.index("Ñ") >= 3:
+                trozos.append(p[:p.index("Ñ")])
+            break
+        trozos.append(p)
+        con_peso += p not in vacias
+        if con_peso == 2:
+            break
+    primera = next((p for p in trozos if p not in vacias), "")
+    salida = []
+    for q in (" ".join(trozos).strip(), primera):
+        if len(q) >= 4 and q not in salida:
+            salida.append(q)
+    return salida
+
+
+def bdns_candidatos(red: Red, nombre: str) -> tuple:
+    """(cif, nombre en BDNS, similitud) del mejor candidato, o (None, motivo, 0).
+
+    La Base de Datos Nacional de Subvenciones publica quién ha recibido una
+    ayuda, con su NIF. Con el Kit Digital y las ayudas COVID son muchas pymes.
+    Es la única fuente oficial y gratuita que da un CIF a partir de un nombre.
+    Solo se aceptan personas jurídicas, y solo si un único CIF se parece de
+    verdad al nombre: con dos candidatos parecidos, no se propone ninguno."""
+    consultas = consultas_bdns(nombre)
+    if not consultas:
+        return None, "nombre demasiado corto para buscarlo", 0
+    texto = ""
+    for q in consultas:
+        texto = red.get(f"{BDNS}?{urllib.parse.urlencode({'vpd': 'GE', 'busqueda': q})}", "bdns")
+        if texto is None:
+            return None, "sin respuesta de la BDNS" if red.activa else "sin red", 0
+        if texto.strip():
+            break
+    if not texto.strip():                # 204: no hay nadie con ese nombre
+        return None, "ningún beneficiario de la BDNS con ese nombre", 0
+    try:
+        terceros = json.loads(texto).get("terceros", [])
+    except ValueError:
+        return None, "respuesta de la BDNS ilegible", 0
+    h = huella(nombre)
+    buscadas = [p for p in h.split() if len(p) >= 3]
+    forma = forma_del_nombre(nombre)
+    mejor = {}
+    for t in terceros:
+        cif, _, nombre_bdns = str(t.get("descripcion", "")).partition(" - ")
+        cif = normalizar_id(cif)
+        if not cif_valido(cif):          # un DNI o un NIE no se toca: persona física
+            continue
+        # Todas las palabras del nombre, enteras: «Inditex» no es «Blinditex»
+        presentes = set(huella(nombre_bdns).split())
+        if not buscadas or not all(p in presentes for p in buscadas):
+            continue
+        # Y la letra del CIF tiene que ser la de su forma jurídica: una SA no es una SL
+        if forma and cif[0] != LETRA_DE_FORMA[forma]:
+            continue
+        sim = parecido(h, huella(nombre_bdns))
+        if sim > mejor.get(cif, ("", 0))[1]:
+            mejor[cif] = (nombre_bdns.strip(), sim)
+    buenos = sorted(((c, n, s) for c, (n, s) in mejor.items() if s >= 0.85), key=lambda x: -x[2])
+    if not buenos:
+        return None, "ningún beneficiario de la BDNS con un nombre parecido", 0
+    if len(buenos) > 1 and buenos[1][2] >= buenos[0][2] - 0.05:
+        return None, f"varios CIF en la BDNS con nombres parecidos ({buenos[0][0]}, {buenos[1][0]})", 0
+    return buenos[0]
+
+
+FORMAS_LARGAS = [("SOCIEDAD LIMITADA LABORAL", "SLL"), ("SOCIEDAD LIMITADA NUEVA EMPRESA", "SLNE"),
+                 ("SOCIEDAD LIMITADA PROFESIONAL", "SLP"), ("SOCIEDAD LIMITADA UNIPERSONAL", "SLU"),
+                 ("SOCIEDAD ANONIMA UNIPERSONAL", "SAU"), ("SOCIEDAD LIMITADA", "SL"),
+                 ("SOCIEDAD ANONIMA", "SA"), ("SOCIEDAD COOPERATIVA", "SCOOP"), ("COMUNIDAD DE BIENES", "CB")]
+
+
+def nombre_corto(nombre: str) -> str:
+    """«Talleres Pérez, Sociedad Limitada» → «TALLERES PEREZ SL». VIES compara
+    el nombre de forma aproximada, pero con la forma jurídica larga dice que no
+    coincide: hay que mandarla abreviada."""
+    s = re.sub(r"[^A-Z0-9 ]+", " ", sin_acentos(nombre).upper())
+    s = re.sub(r"\s+", " ", s).strip()
+    for larga, corta in FORMAS_LARGAS:
+        s = re.sub(rf"\b{larga}\b", corta, s)
+    # «S L» y «S A U», de haber escrito «S. L.». Solo las formas conocidas: juntar
+    # a ciegas las letras sueltas convertía «S.M.E., S.A.» (Renfe) en «S MESA».
+    for suelta, junta in (("S L N E", "SLNE"), ("S L L", "SLL"), ("S L P", "SLP"), ("S L U", "SLU"),
+                          ("S A U", "SAU"), ("S M E", "SME"), ("S L", "SL"), ("S A", "SA"), ("C B", "CB")):
+        s = re.sub(rf"\b{suelta}\b", junta, s)
+    return s
+
+
+def vies_compara(red: Red, cif: str, nombre: str, cp: str) -> dict | None:
+    """Pregunta a VIES si ese nombre y ese CP son los del CIF. Para España VIES
+    no devuelve nombre ni dirección, pero **sí compara** lo que se le manda, y
+    tolera erratas. Solo conoce a los operadores intracomunitarios: que un CIF
+    no esté no significa que sea falso."""
+    datos = {"countryCode": "ES", "vatNumber": normalizar_id(cif).removeprefix("ES"),
+             "traderName": nombre_corto(nombre)}
+    cp = re.sub(r"\D", "", cp or "")
+    if len(cp) == 5:
+        datos["traderPostalCode"] = cp
+    r = red.post_json(VIES_COMPARA, datos, "vies")
+    if not r or "valid" not in r:
+        return None
+    return {"valido": bool(r.get("valid")), "nombre": r.get("traderNameMatch"),
+            "cp": r.get("traderPostalCodeMatch") if "traderPostalCode" in datos else None}
+
+
+# La forma jurídica que dice el nombre, y la letra que le toca al CIF.
+LETRA_DE_FORMA = {"SA": "A", "SAU": "A", "SL": "B", "SLU": "B", "SLL": "B", "SLNE": "B", "SLP": "B",
+                  "SCOOP": "F", "COOP": "F", "CB": "E"}
+
+
+def forma_del_nombre(nombre: str) -> str | None:
+    ultimas = nombre_corto(nombre).split()[-2:]
+    for p in reversed(ultimas):
+        if p in LETRA_DE_FORMA:
+            return p
+    return None
+
+
+# Prefijos de los teléfonos fijos por provincia (plan nacional de numeración).
+# Ceuta y Melilla comparten prefijo con Cádiz y Málaga.
+PREFIJO_PROVINCIA = {
+    "91": {"28"}, "93": {"08"},
+    "920": {"05"}, "921": {"40"}, "922": {"38"}, "923": {"37"}, "924": {"06"}, "925": {"45"},
+    "926": {"13"}, "927": {"10"}, "928": {"35"}, "941": {"26"}, "942": {"39"}, "943": {"20"},
+    "944": {"48"}, "945": {"01"}, "946": {"48"}, "947": {"09"}, "948": {"31"}, "949": {"19"},
+    "950": {"04"}, "951": {"29"}, "952": {"29", "52"}, "953": {"23"}, "954": {"41"}, "955": {"41"},
+    "956": {"11", "51"}, "957": {"14"}, "958": {"18"}, "959": {"21"}, "960": {"46"}, "961": {"46"},
+    "962": {"46"}, "963": {"46"}, "964": {"12"}, "965": {"03"}, "966": {"03"}, "967": {"02"},
+    "968": {"30"}, "969": {"16"}, "971": {"07"}, "972": {"17"}, "973": {"25"}, "974": {"22"},
+    "975": {"42"}, "976": {"50"}, "977": {"43"}, "978": {"44"}, "979": {"34"}, "980": {"49"},
+    "981": {"15"}, "982": {"27"}, "983": {"47"}, "984": {"33"}, "985": {"33"}, "986": {"36"},
+    "987": {"24"}, "988": {"32"},
+}
+
+
+def provincias_de_telefono(tel: str) -> set | None:
+    """Las provincias posibles de un fijo, o None si es móvil, 90x o no se sabe."""
+    s = re.sub(r"\D", "", str(tel))[-9:]
+    if len(s) != 9 or not s.startswith("9") or s.startswith("90"):
+        return None
+    return PREFIJO_PROVINCIA.get(s[:3]) or PREFIJO_PROVINCIA.get(s[:2])
+
+
 RECURSO_ESTATICO = re.compile(r"\.(css|js|json|xml|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|zip|mp4)$|/wp-(content|includes|json)/",
                               re.I)
 
@@ -520,12 +750,53 @@ def prioridad_enlace(url: str) -> tuple:
     return (9, len(ruta))
 
 
+RE_BLOQUE = re.compile(r"(?i)<br\s*/?>|</?(p|div|li|tr|h[1-6]|address|footer|header|section|article|"
+                       r"dd|dt|ul|ol|table|nav|aside|blockquote)\b[^>]*>")
+RE_ANTIBOT = re.compile(r"just a moment|cf-chl|challenge-platform|captcha|attention required|"
+                        r"verify you are human|comprobando (su|tu) navegador", re.I)
+
+
 def texto_de_html(html: str) -> str:
-    html = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", html)
-    html = re.sub(r"(?s)<[^>]+>", " ", html)
-    for a, b in (("&nbsp;", " "), ("&amp;", "&"), ("&#64;", "@"), ("&middot;", "·")):
-        html = html.replace(a, b)
-    return re.sub(r"\s+", " ", html)
+    """El texto de la página, **una línea por bloque**: así se sabe qué va
+    con qué. Un CIF en la misma línea que «Tomo, Folio, Hoja» es del titular;
+    uno en la línea de «Diseño web por» es de la agencia. La idea de trabajar
+    por bloques es la de los extractores de Impressum alemanes."""
+    import html as html_lib
+    html = re.sub(r"(?is)<(script|style|noscript|svg|template|head)[^>]*>.*?</\1>", " ", html)
+    html = RE_BLOQUE.sub("\n", html)
+    html = html_lib.unescape(re.sub(r"(?s)<[^>]+>", " ", html))
+    lineas = (re.sub(r"[^\S\n]+", " ", linea).strip() for linea in html.split("\n"))
+    return "\n".join(linea for linea in lineas if linea)
+
+
+def organizaciones_jsonld(html: str) -> list:
+    """Los datos schema.org que la propia web declara de sí misma en JSON-LD
+    (Organization, LocalBusiness…): teléfono, correo, CIF y dirección sin
+    adivinar nada. Lo que hace extruct, con la librería estándar."""
+    salida = []
+    for bloque in re.findall(r"""(?is)<script[^>]+application/ld\+json[^>]*>(.*?)</script>""", html):
+        try:
+            datos = json.loads(bloque.strip())
+        except ValueError:
+            continue
+        pendientes = datos if isinstance(datos, list) else [datos]
+        while pendientes:
+            d = pendientes.pop()
+            if not isinstance(d, dict):
+                continue
+            pendientes.extend(x for x in d.get("@graph", []) if isinstance(x, dict))
+            tipo = d.get("@type")
+            tipos = tipo if isinstance(tipo, list) else [tipo]
+            if not any(str(t).endswith(("Organization", "Business", "Corporation", "Store", "Service"))
+                       for t in tipos):
+                continue
+            dire = d.get("address") if isinstance(d.get("address"), dict) else {}
+            salida.append({k: str(v).strip() for k, v in {
+                "nombre": d.get("legalName") or d.get("name"), "cif": d.get("vatID") or d.get("taxID"),
+                "telefono": d.get("telephone"), "email": d.get("email"),
+                "cp": dire.get("postalCode"), "poblacion": dire.get("addressLocality"),
+                "provincia": dire.get("addressRegion")}.items() if v and isinstance(v, (str, int))})
+    return salida
 
 
 def leer_web(red: Red, web: str) -> dict:
@@ -537,7 +808,7 @@ def leer_web(red: Red, web: str) -> dict:
     if not partes.netloc:
         return {}
     base = f"{partes.scheme}://{partes.netloc}"
-    visitadas, pendientes, textos = [], [web], []
+    visitadas, pendientes, textos, jsonld = [], [web], [], []
     while pendientes and len(visitadas) < 4:
         url = pendientes.pop(0)
         if url in visitadas or not red.permitido(url):
@@ -548,6 +819,7 @@ def leer_web(red: Red, web: str) -> dict:
         if not pag:
             continue
         textos.append((url, pag["texto"]))
+        jsonld += [dict(o, url=url) for o in pag.get("jsonld", [])]
         if len(visitadas) == 1:
             # Todos los enlaces de la portada, y después los mejores: el aviso
             # legal suele estar al pie, detrás de todo lo demás.
@@ -560,27 +832,45 @@ def leer_web(red: Red, web: str) -> dict:
                     candidatos.add(destino)
             pendientes = sorted(candidatos, key=prioridad_enlace)[:3]
     cifs, tels, correos = Counter(), Counter(), Counter()
-    fuente, contexto = {}, {}
+    fuente, contexto, senales = {}, {}, {}
     for url, t in textos:
-        for m in RE_CIF_TEXTO.finditer(t.upper()):
-            c = "".join(m.groups())
-            if cif_valido(c):
+        lineas = t.split("\n")
+        for i, linea in enumerate(lineas):
+            cerca = "\n".join(lineas[max(0, i - 3):i + 4])      # el bloque y sus vecinos
+            junto = "\n".join(lineas[max(0, i - 1):i + 2])      # la línea y las dos de al lado
+            agencia = bool(RE_AGENCIA.search(junto))
+            for m in RE_CIF_TEXTO.finditer(linea.upper()):
+                c = "".join(m.groups())
+                if not cif_valido(c):
+                    continue
+                s = senales.setdefault(c, {"agencia": False, "titular": False, "registro": False, "puntos": 0})
+                if agencia:
+                    s["agencia"] = True          # el de quien firma el pie, no el de la empresa
+                    continue
                 cifs[c] += 1
                 fuente.setdefault(("cif", c), url)
-                contexto.setdefault(c, t[max(0, m.start() - 400):m.end() + 400])
-        for m in RE_TEL.finditer(t):
-            tel = re.sub(r"\D", "", m.group(0))[-9:]
-            if len(tel) == 9:
-                tels[tel] += 1
-                fuente.setdefault(("tel", tel), url)
-        for m in RE_EMAIL.finditer(t):
-            e = m.group(0).lower().rstrip(".")
-            if not re.search(r"\.(png|jpe?g|gif|webp|svg)$", e):
-                correos[e] += 1
-                fuente.setdefault(("email", e), url)
+                contexto.setdefault(c, cerca)
+                s["titular"] |= bool(RE_TITULAR.search(cerca))
+                s["registro"] |= bool(RE_REGISTRO.search(cerca))
+                # En la misma línea pesa el doble que en la de al lado: dos CIF
+                # en líneas seguidas no pueden llevarse la misma señal.
+                puntos = 2 * bool(RE_TITULAR.search(linea)) + 2 * bool(RE_REGISTRO.search(linea))                     + bool(RE_TITULAR.search(junto)) + bool(RE_REGISTRO.search(junto))
+                s["puntos"] = max(s["puntos"], puntos)
+            if agencia:
+                continue
+            for m in RE_TEL.finditer(linea):
+                tel = re.sub(r"\D", "", m.group(0))[-9:]
+                if len(tel) == 9:
+                    tels[tel] += 1
+                    fuente.setdefault(("tel", tel), url)
+            for m in RE_EMAIL.finditer(linea):
+                e = m.group(0).lower().rstrip(".")
+                if not re.search(r"\.(png|jpe?g|gif|webp|svg)$", e):
+                    correos[e] += 1
+                    fuente.setdefault(("email", e), url)
     return {"cifs": cifs, "telefonos": tels, "emails": correos, "fuente": fuente, "base": base,
-            "contexto": contexto,
-            "texto": " ".join(t for _, t in textos)}
+            "contexto": contexto, "senales": senales, "jsonld": jsonld,
+            "texto": "\n".join(t for _, t in textos)}
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +899,7 @@ class Resultado:
     sin_columna: Counter = field(default_factory=Counter)
     vies: list = field(default_factory=list)
     notas: list = field(default_factory=list)
+    comprobaciones: list = field(default_factory=list)   # (fila, identificador, qué, resultado, fuente)
 
 
 def web_a_leer(fila, roles: dict, op) -> str:
@@ -659,12 +950,28 @@ def enriquecer(df, entidad: str, fichero: str, roles: dict, red: Red, op) -> Res
 
     # Las webs se leen antes, en paralelo: lo que tarda es esperar a las que no
     # contestan, y eso no hace falta hacerlo de una en una.
+    repetidos_cif, repetidos_tel = set(), set()
     if op.red:
-        webs = [w for _, f in df.iterrows() if (w := web_a_leer(f, roles, op))]
+        webs = sorted({w for _, f in df.iterrows() if (w := web_a_leer(f, roles, op))})
         if webs:
-            print(f"    leyendo {len(set(webs))} webs…", flush=True)
+            print(f"    leyendo {len(webs)} webs…", flush=True)
             with ThreadPoolExecutor(max_workers=8) as ex:
-                list(ex.map(lambda w: leer_web(red, w), sorted(set(webs))))
+                leidas = list(ex.map(lambda w: leer_web(red, w), webs))
+            # Un CIF o un teléfono que sale en las webs de dos empresas distintas
+            # del fichero es de la agencia que las hizo, del alojamiento o del
+            # grupo: no es de ninguna de las dos.
+            dominios_de = defaultdict(set)
+            for d in leidas:
+                dom = urllib.parse.urlsplit(d.get("base", "")).netloc.removeprefix("www.")
+                for c in d.get("cifs", {}):
+                    dominios_de[("cif", c)].add(dom)
+                for t in d.get("telefonos", {}):
+                    dominios_de[("tel", t)].add(dom)
+            repetidos_cif = {c for (k, c), doms in dominios_de.items() if k == "cif" and len(doms) >= 2}
+            repetidos_tel = {t for (k, t), doms in dominios_de.items() if k == "tel" and len(doms) >= 2}
+            if repetidos_cif or repetidos_tel:
+                res.notas.append(f"{len(repetidos_cif)} CIF y {len(repetidos_tel)} teléfonos salen en webs de "
+                                 f"varias empresas del fichero (agencia, alojamiento o grupo): no se proponen")
 
     total = len(df)
     for k, (idx, fila) in enumerate(df.iterrows(), start=1):
@@ -728,21 +1035,40 @@ def enriquecer(df, entidad: str, fichero: str, roles: dict, red: Red, op) -> Res
                 if web_deducida:
                     proponer(n, fila, "web", datos["base"], conf_web, datos["base"],
                              f"Dominio de su correo ({dominio}), y la web responde{aviso}")
-                if not nif and datos["cifs"]:
-                    if len(datos["cifs"]) == 1:
-                        cif = next(iter(datos["cifs"]))
-                        cerca = nombre_aparece(nombre, datos["contexto"][cif])
-                        proponer(n, fila, "nif", cif, "alta" if cerca else conf_web,
-                                 datos["fuente"][("cif", cif)],
-                                 "El único CIF de su web, junto a su nombre" if cerca
-                                 else "El único CIF de su web, pero no junto a su nombre" + aviso)
-                    else:
-                        res.notas.append(f"Fila {n}: su web lleva {len(datos['cifs'])} CIF distintos; "
-                                         f"no se propone ninguno")
-                if not v(fila, "telefono") and datos["telefonos"]:
-                    tel, veces = datos["telefonos"].most_common(1)[0]
+
+                # Lo que la web declara de sí misma en schema.org, si es de ella
+                org = next((o for o in datos.get("jsonld", []) if o.get("nombre")
+                            and nombre_aparece(nombre, o["nombre"])), None)
+
+                if not nif:
+                    cif, conf, porque, fuente_cif = elegir_cif(datos, org, nombre, repetidos_cif, es_suya, aviso)
+                    if cif:
+                        v_ = vies_compara(red, cif, nombre, cp)
+                        if v_ and v_["valido"] and v_["nombre"] == "VALID":
+                            conf = "alta"
+                            porque += " · VIES confirma que el nombre" + (" y el CP" if v_["cp"] == "VALID"
+                                                                          else "") + " son de ese CIF"
+                        elif v_ and v_["valido"] and v_["nombre"] == "INVALID":
+                            conf = "baja"
+                            porque += " · VIES dice que ese CIF es de un operador con otro nombre"
+                        elif v_ and not v_["valido"]:
+                            porque += " · no consta en VIES (no es operador intracomunitario, o no existe)"
+                        proponer(n, fila, "nif", cif, conf, fuente_cif, porque)
+                    elif porque:
+                        res.notas.append(f"Fila {n}: {porque}")
+
+                tels = [t for t, _ in datos["telefonos"].most_common() if t not in repetidos_tel]
+                tel_org = re.sub(r"\D", "", (org or {}).get("telefono", ""))[-9:]
+                if not v(fila, "telefono") and len(tel_org) == 9 and tel_org[0] in "6789":
+                    proponer(n, fila, "telefono", tel_org, conf_web, org["url"],
+                             f"El teléfono que declara su web en schema.org{aviso}")
+                elif not v(fila, "telefono") and tels:
+                    tel = tels[0]
                     proponer(n, fila, "telefono", tel, conf_web, datos["fuente"][("tel", tel)],
-                             f"El teléfono que más aparece en su web ({veces} veces){aviso}")
+                             f"El teléfono que más aparece en su web ({datos['telefonos'][tel]} veces){aviso}")
+                if not cp and org and re.fullmatch(r"\d{5}", org.get("cp", "")):
+                    proponer(n, fila, "cp", org["cp"], conf_web, org["url"],
+                             f"El código postal que declara su web en schema.org{aviso}")
                 if not email and datos["emails"]:
                     propios = [e for e in datos["emails"] if e.endswith("@" + urllib.parse.urlsplit(
                         datos["base"]).netloc.removeprefix("www."))] or list(datos["emails"])
@@ -750,10 +1076,87 @@ def enriquecer(df, entidad: str, fichero: str, roles: dict, red: Red, op) -> Res
                     proponer(n, fila, "email", e, conf_web, datos["fuente"][("email", e)],
                              f"Correo publicado en su web{aviso}")
 
-        # 4 · VIES, si se pide
-        if op.vies and nif and cif_valido(nif) and op.red:
-            res.vies.append((n, nif, vies(red, nif)))
+        # 3b · sin CIF en su web: la BDNS, si se pide
+        if not nif and op.bdns and op.red and not any(p.fila == n and p.columna == roles.get("nif")
+                                                      for p in res.propuestas):
+            cif, nombre_bdns, sim = bdns_candidatos(red, nombre)
+            if cif:
+                conf, porque = "media", f"Beneficiario de una ayuda pública como «{nombre_bdns}»"
+                v_ = vies_compara(red, cif, nombre, cp)
+                if v_ and v_["valido"] and v_["nombre"] == "VALID":
+                    conf, porque = "alta", porque + " · VIES confirma que el nombre es de ese CIF"
+                elif v_ and v_["valido"] and v_["nombre"] == "INVALID":
+                    conf, porque = "baja", porque + " · VIES dice que ese CIF es de otro nombre"
+                proponer(n, fila, "nif", cif, conf, "BDNS (infosubvenciones.es)", porque)
+            elif nombre_bdns and "parecidos" in nombre_bdns:
+                res.notas.append(f"Fila {n}: {nombre_bdns}")
+
+        # 4 · coherencia de lo que ya hay, sin salir del ordenador
+        ident = nombre or nif
+        cif_norm = normalizar_id(nif).removeprefix("ES")
+        forma = forma_del_nombre(nombre) if nombre else None
+        if forma and cif_valido(cif_norm) and cif_norm[0] != LETRA_DE_FORMA[forma]:
+            res.comprobaciones.append((n, ident, "Letra del CIF y forma jurídica",
+                                       f"REVISAR: el nombre dice {forma} y un CIF que empieza por {cif_norm[0]} "
+                                       f"no es de {forma} (le tocaría {LETRA_DE_FORMA[forma]})",
+                                       "Orden EHA/451/2008 (letras del NIF de entidades)"))
+        provs = provincias_de_telefono(v(fila, "telefono"))
+        if cod and provs and cod not in provs:
+            res.comprobaciones.append((n, ident, "Prefijo del teléfono y CP",
+                                       f"AVISO: el fijo es de {', '.join(PROVINCIAS[p] for p in sorted(provs))} y el "
+                                       f"CP de {PROVINCIAS[cod]}. Puede ser la sede; o uno de los dos está mal",
+                                       "Plan nacional de numeración"))
+
+        # 5 · VIES para los CIF que ya tiene, si se pide: ¿es suyo ese CIF?
+        if op.vies and nif and cif_valido(cif_norm) and op.red:
+            v_ = vies_compara(red, cif_norm, nombre, cp) if nombre else None
+            res.vies.append((n, nif, None if v_ is None else v_["valido"]))
+            if v_ and v_["valido"] and v_["nombre"] == "INVALID":
+                # Señal débil: VIES solo casa la razón social casi completa. En un
+                # maestro real, 111 de 390 no casaban, y eran sobre todo nombres
+                # comerciales («Hotel…», «… Suites») y razones sociales recortadas.
+                res.comprobaciones.append((n, ident, "VIES: nombre del CIF",
+                                           "AVISO: VIES no reconoce este nombre para ese CIF. Casi siempre es un "
+                                           "nombre comercial o una razón social recortada; si el nombre es la "
+                                           "razón social completa, el CIF puede ser de otra empresa", "VIES"))
+            elif v_ and v_["valido"] and v_["cp"] == "INVALID":
+                res.comprobaciones.append((n, ident, "VIES: CP del CIF",
+                                           "AVISO: el nombre cuadra pero el CP no es el que tiene VIES: "
+                                           "¿domicilio fiscal distinto?", "VIES"))
     return res
+
+
+def elegir_cif(datos: dict, org: dict | None, nombre: str, repetidos: set, es_suya: bool, aviso: str) -> tuple:
+    """(cif, confianza, por qué, fuente) o (None, None, motivo, None). Primero
+    lo que la web declara de sí misma en schema.org; después el del bloque que
+    identifica al titular. Nunca el de la agencia, ni uno que sale en las webs
+    de varias empresas del fichero."""
+    if org:
+        c = normalizar_id(org.get("cif", "")).removeprefix("ES")
+        if cif_valido(c) and c not in repetidos:
+            return c, "alta", "El CIF que declara su web en schema.org, con su nombre", org["url"]
+    candidatos = [c for c in datos["cifs"] if c not in repetidos]
+    if not candidatos:
+        agencias = [c for c, s in datos.get("senales", {}).items() if s["agencia"]]
+        if agencias or any(c in repetidos for c in datos["cifs"]):
+            return None, None, "el único CIF de su web es de la agencia o sale en otras webs: no se propone", None
+        return None, None, "", None
+    if len(candidatos) > 1:
+        puntos = {c: datos["senales"][c]["puntos"] for c in candidatos}
+        mejor = max(puntos.values())
+        del_titular = [c for c in candidatos if puntos[c] == mejor]
+        if mejor == 0 or len(del_titular) != 1:
+            return None, None, f"su web lleva {len(candidatos)} CIF distintos; no se propone ninguno", None
+        candidatos = del_titular
+    cif = candidatos[0]
+    s = datos["senales"][cif]
+    fuente = datos["fuente"][("cif", cif)]
+    if nombre_aparece(nombre, datos["contexto"][cif]):
+        return cif, "alta", "El CIF de su web, junto a su nombre", fuente
+    if s["registro"] or s["titular"]:
+        return cif, "media" if es_suya else "baja", \
+            "El CIF que su web da como titular (aviso legal, datos registrales), sin su nombre al lado" + aviso, fuente
+    return cif, "media" if es_suya else "baja", "El único CIF de su web, pero no junto a su nombre" + aviso, fuente
 
 
 # ---------------------------------------------------------------------------
@@ -822,13 +1225,13 @@ def escribir(resultados: list, ruta: Path, red: Red, op) -> None:
     ws.row_dimensions[4].height = 45
     f = 6
     for i, cab in enumerate(["Entidad", "Filas", "Empresas", "Personas (no se buscan)", "Dudosas",
-                             "Propuestas"], start=1):
+                             "Propuestas", "Comprobaciones"], start=1):
         c = ws.cell(f, i, cab)
         c.fill, c.font = azul, blanco
     for r in resultados:
         f += 1
         for i, val in enumerate([r.entidad, r.filas, r.clases["empresa"], r.clases["persona"],
-                                 r.clases["dudoso"], len(r.propuestas)], start=1):
+                                 r.clases["dudoso"], len(r.propuestas), len(r.comprobaciones)], start=1):
             ws.cell(f, i, val)
     f += 2
     ws.cell(f, 1, "Consultas hechas").font = Font(bold=True)
@@ -836,6 +1239,12 @@ def escribir(resultados: list, ruta: Path, red: Red, op) -> None:
         f += 1
         ws.cell(f, 1, tipo)
         ws.cell(f, 2, n)
+    for texto, conjunto in (("Webs con protección contra robots (no se leen)", red.antibot),
+                            ("Webs que pidieron parar (429/503)", red.abandonados)):
+        if conjunto:
+            f += 1
+            ws.cell(f, 1, texto)
+            ws.cell(f, 2, len(conjunto))
     notas = [(r.entidad, x) for r in resultados for x in r.notas] + \
             [(r.entidad, f"{n} datos de «{rol}» encontrados, pero el fichero no tiene esa columna")
              for r in resultados for rol, n in r.sin_columna.items()]
@@ -849,7 +1258,7 @@ def escribir(resultados: list, ruta: Path, red: Red, op) -> None:
     for i, a in enumerate([34, 12, 12, 22, 12, 12], start=1):
         ws.column_dimensions[get_column_letter(i)].width = a
 
-    usados = {"Resumen", "VIES"}
+    usados = {"Resumen", "VIES", "Comprobaciones"}
     for r in resultados:
         if not r.propuestas:
             continue
@@ -876,6 +1285,19 @@ def escribir(resultados: list, ruta: Path, red: Red, op) -> None:
         for i, a in enumerate(ANCHOS, start=1):
             h.column_dimensions[get_column_letter(i)].width = a
 
+    if any(r.comprobaciones for r in resultados):
+        # Lo que no es una propuesta sino una duda sobre lo que ya hay: no se
+        # aplica nada desde aquí. Es para la siguiente conversación con el cliente.
+        h = wb.create_sheet("Comprobaciones")
+        h.append(["Entidad", "Fila", "Identificador", "Qué se ha comprobado", "Resultado", "Fuente"])
+        for i in range(1, 7):
+            h.cell(1, i).fill, h.cell(1, i).font = azul, blanco
+        for r in resultados:
+            for fila in sorted(r.comprobaciones, key=lambda x: (0 if x[3].startswith("REVISAR") else 1, x[0])):
+                h.append([r.entidad, *fila])
+        for i, a in enumerate([24, 8, 30, 28, 80, 30], start=1):
+            h.column_dimensions[get_column_letter(i)].width = a
+        h.freeze_panes = "A2"
     if any(r.vies for r in resultados):
         h = wb.create_sheet("VIES")
         h.append(["Entidad", "Fila", "CIF", "¿Operador intracomunitario?"])
@@ -893,6 +1315,7 @@ def escribir(resultados: list, ruta: Path, red: Red, op) -> None:
 class Opciones:
     red: bool = True
     vies: bool = False
+    bdns: bool = False
     incluir_dudosos: bool = False
 
 
@@ -904,6 +1327,7 @@ def main(argv=None) -> int:
     ap.add_argument("--columna", action="append", metavar="ROL=COLUMNA")
     ap.add_argument("--sin-red", action="store_true")
     ap.add_argument("--vies", action="store_true")
+    ap.add_argument("--bdns", action="store_true")
     ap.add_argument("--incluir-dudosos", action="store_true")
     ap.add_argument("--simular", action="store_true")
     ap.add_argument("--permitir-git", action="store_true")
@@ -940,7 +1364,7 @@ def main(argv=None) -> int:
         if not f.exists():
             morir(f"No existe: {f}")
 
-    op = Opciones(red=not a.sin_red, vies=a.vies, incluir_dudosos=a.incluir_dudosos)
+    op = Opciones(red=not a.sin_red, vies=a.vies, bdns=a.bdns, incluir_dudosos=a.incluir_dudosos)
     ruta = salida / f"Enriquecimiento-{datetime.now():%Y-%m-%d}.xlsx"
     cache_path = None if a.simular else salida / ".cache-enriquecer.json"
     if not a.simular:

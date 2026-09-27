@@ -40,13 +40,31 @@ las identifique: úsalo sabiendo lo que haces.
 | CP, municipio, provincia | [CartoCiudad](https://www.cartociudad.es) (Instituto Geográfico Nacional), desde la dirección | La dirección |
 | CIF, teléfono, correo | La web de la empresa. La LSSI la obliga a publicar NIF, razón social y domicilio en el aviso legal | La URL |
 | Web | El dominio de su correo, si no es genérico (gmail, hotmail…) | El dominio |
-| ¿Operador intracomunitario? | [VIES](https://ec.europa.eu/taxation_customs/vies/), con `--vies`. Para España solo dice sí o no: no da nombre ni dirección | El CIF |
+| CIF, teléfono, CP declarados | Los datos schema.org (JSON-LD) que la web publica de sí misma | La URL |
+| ¿Son suyos ese CIF y ese CP? | [VIES](https://ec.europa.eu/taxation_customs/vies/): para España no devuelve nombre ni dirección, **pero compara** los que se le mandan. Confirma o degrada cada CIF propuesto; con `--vies`, también los que ya hay | El CIF, el nombre y el CP |
+| CIF sin web ni correo propio | La [Base de Datos Nacional de Subvenciones](https://www.infosubvenciones.es), con `--bdns`: quien ha recibido una ayuda pública, con su CIF. Opcional: su aviso legal permite restringir el acceso ante abuso | El nombre |
+
+Y sin salir del ordenador, la pestaña **Comprobaciones**: la letra del CIF
+frente a la forma jurídica (una «S.A.» con CIF de limitada), y el prefijo del
+teléfono fijo frente a la provincia del CP.
+
+## Cómo sabe que el dato es de ella
+
+- **Lee la web por bloques.** El CIF del bloque que firma la agencia
+  («Diseño web por…», «hosting») no cuenta. El del bloque con «Tomo, Folio,
+  Hoja» o «titular» es el del titular de la web, que es lo que pide la LSSI
+- **Un CIF o un teléfono en las webs de dos empresas del fichero** es de la
+  agencia, del alojamiento o del grupo, y no se propone
+- **Palabras enteras**: «Inditex» no se empareja con «Blinditex», aunque se
+  parezcan un 87 %
+- **La letra del CIF tiene que cuadrar con la forma jurídica** al emparejar
+  con la BDNS: una SA no es una SL
 
 ## Confianza
 
 | Confianza | Cuándo |
 |---|---|
-| **ALTA** | CP → provincia · dirección de CartoCiudad con el portal exacto y que cuadra con el CP, la población o la provincia · CIF que aparece en la web **junto al nombre de la empresa**, con sus palabras enteras |
+| **ALTA** | CP → provincia · dirección de CartoCiudad con el portal exacto y que cuadra con el CP, la población o la provincia · CIF que aparece en la web **junto al nombre de la empresa**, con sus palabras enteras · CIF que **VIES confirma** para ese nombre · CIF que la web declara en schema.org |
 | **MEDIA** | Dirección que cuadra pero sin portal exacto · dato de una web donde aparece el nombre de la empresa |
 | **BAJA** | Dato de una web donde **no aparece su nombre**: el correo puede ser de la gestoría, del grupo o de quien le lleva la informática |
 | **REVISAR** | Dos datos del registro que se contradicen (provincia y CP) |
@@ -89,11 +107,18 @@ vacíos, encuentra más y se equivoca menos.
 - Con varios cientos de empresas, cuenta con unos minutos: van saliendo por
   pantalla de cincuenta en cincuenta
 
+## Cortesía (y 2)
+
+Respeta el `Crawl-delay` que pida cada `robots.txt`, deja en paz un servidor
+que responde 429 o 503, y **no intenta esquivar** una protección contra robots:
+la anota y sigue. VIES y la BDNS, a una consulta por segundo.
+
 ## Lo que todavía no hace
 
-**Buscar un CIF solo con el nombre**, cuando no hay web ni correo propio. No
-hay fuente oficial gratuita que lo dé. La siguiente versión lo hará con una API
-de búsqueda de cuota gratuita, sin tokens, y siempre como propuesta con enlace.
+- **CP → municipio sin red**, con el callejero del INE (CC BY 4.0). Con el 18 %
+  de los CP repartidos entre varios municipios, hace falta desempatar por calle
+- **GLEIF** como fuente de domicilio para las empresas con LEI
+- **Varios domicilios** para un mismo CIF
 
 ## Los datos del cliente
 

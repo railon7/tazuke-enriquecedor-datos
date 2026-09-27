@@ -34,9 +34,14 @@ AVISO = ('<html><p>TALLERES FICTICIOS DEL SUR, S.L. · CIF B-12.345.674 · '
 class RedFalsa(ed.Red):
     """Contesta de memoria, y apunta lo que le preguntan."""
 
-    def __init__(self):
+    def __init__(self, vies=None):
         super().__init__(None, activa=True)
         self.preguntas = []
+        self.respuesta_vies = vies      # lo que contestaría VIES, o None: sin respuesta
+
+    def post_json(self, url, datos, tipo):
+        self.preguntas.append(url)
+        return self.respuesta_vies
 
     def descargar(self, url, tipo, max_bytes=600_000):
         self.preguntas.append(url)
@@ -194,6 +199,137 @@ class DePuntaAPunta(unittest.TestCase):
         red = ed.Red(None, activa=False)
         self.assertIsNone(red.get("https://example.invalid/", "web"))
         self.assertEqual(sum(red.consultas.values()), 0)
+
+
+class RedWebs(RedFalsa):
+    """Varias webs inventadas, cada una con su trampa."""
+    PAGINAS = {
+        "agencia.example": '<p>Hostelería Inventada SL</p><footer><p>Diseño web por Agencia Falsa SL · '
+                           'CIF B12345674</p></footer>',
+        "dos-cifs.example": '<p>Cliente nuestro: Otra SA, CIF A58818501</p>'
+                            '<p>Titular: Dos Cifs Inventada SL · CIF B87654323 · Registro Mercantil de '
+                            'Málaga, Tomo 1, Folio 2, Hoja MA-3</p>',
+        "jsonld.example": '<script type="application/ld+json">{"@context":"https://schema.org",'
+                          '"@type":"LocalBusiness","name":"Jsonld Inventada SL","telephone":"+34 952 111 222",'
+                          '"address":{"@type":"PostalAddress","postalCode":"29001"}}</script><p>Hola</p>',
+        "a.example": '<p>Uno Inventada SL</p><p>Teléfono 952 333 444</p>',
+        "b.example": '<p>Dos Inventada SL</p><p>Teléfono 952 333 444</p>',
+    }
+
+    def descargar(self, url, tipo, max_bytes=600_000):
+        self.preguntas.append(url)
+        if url.endswith("robots.txt"):
+            return ""
+        host = ed.urllib.parse.urlsplit(url).netloc
+        return self.PAGINAS.get(host)
+
+
+class Aprendizajes(unittest.TestCase):
+    """Lo que salió de revisar herramientas ajenas el 2026-09-27."""
+
+    def enriquecer(self, filas, red):
+        import pandas as pd
+        df = pd.DataFrame(filas)
+        return ed.enriquecer(df, "P", "p.xlsx", ed.asignar_roles(list(df.columns), {}), red, ed.Opciones())
+
+    def test_cif_de_la_agencia_no_se_propone(self):
+        r = self.enriquecer([{"Nombre": "Hostelería Inventada SL", "CIF": "", "Web": "agencia.example",
+                              "Teléfono": "600000000", "Email": "x@y.example"}], RedWebs())
+        self.assertFalse(any(p.columna == "CIF" for p in r.propuestas))
+
+    def test_de_dos_cifs_el_del_titular(self):
+        r = self.enriquecer([{"Nombre": "Otra Empresa Inventada SL", "CIF": "", "Web": "dos-cifs.example",
+                              "Teléfono": "600000000", "Email": "x@y.example"}], RedWebs())
+        prop = {p.columna: p for p in r.propuestas}
+        self.assertEqual(prop["CIF"].propuesto, "B87654323")
+        self.assertIn("titular", prop["CIF"].porque)
+
+    def test_jsonld(self):
+        r = self.enriquecer([{"Nombre": "Jsonld Inventada SL", "CIF": "B12345674", "Web": "jsonld.example",
+                              "Teléfono": "", "Email": "", "CP": ""}], RedWebs())
+        prop = {p.columna: p for p in r.propuestas}
+        self.assertEqual(prop["Teléfono"].propuesto, "952111222")
+        self.assertIn("schema.org", prop["Teléfono"].porque)
+        self.assertEqual(prop["CP"].propuesto, "29001")
+
+    def test_telefono_repetido_en_dos_webs(self):
+        r = self.enriquecer([{"Nombre": "Uno Inventada SL", "CIF": "B12345674", "Web": "a.example", "Teléfono": ""},
+                             {"Nombre": "Dos Inventada SL", "CIF": "B87654323", "Web": "b.example", "Teléfono": ""}],
+                            RedWebs())
+        self.assertFalse(any(p.columna == "Teléfono" for p in r.propuestas))
+
+    def test_vies_sube_y_baja_la_confianza(self):
+        fila = [{"Nombre": "Talleres Ficticios del Sur SL", "CIF": "", "Web": "", "Email": "",
+                 "Teléfono": "", "Dirección": "", "CP": "29100"}]
+        fila[0]["Web"] = "www.talleresficticios.example"
+        ok = self.enriquecer(fila, RedFalsa(vies={"valid": True, "traderNameMatch": "VALID",
+                                                  "traderPostalCodeMatch": "VALID"}))
+        cif = next(p for p in ok.propuestas if p.columna == "CIF")
+        self.assertEqual(cif.confianza, "alta")
+        self.assertIn("VIES confirma", cif.porque)
+        mal = self.enriquecer(fila, RedFalsa(vies={"valid": True, "traderNameMatch": "INVALID"}))
+        cif = next(p for p in mal.propuestas if p.columna == "CIF")
+        self.assertEqual(cif.confianza, "baja")
+
+    def test_comprobaciones(self):
+        r = self.enriquecer([{"Nombre": "Grande Inventada, S.A.", "CIF": "B12345674", "CP": "29001",
+                              "Teléfono": "912345678", "Provincia": "Málaga"}], RedFalsa())
+        que = " ".join(c[2] for c in r.comprobaciones)
+        self.assertIn("Letra del CIF", que)
+        self.assertIn("Prefijo del teléfono", que)
+
+    def test_nombre_corto_para_vies(self):
+        self.assertEqual(ed.nombre_corto("Telefónica, Sociedad Anónima"), "TELEFONICA SA")
+        self.assertEqual(ed.nombre_corto("Talleres Pérez S. L."), "TALLERES PEREZ SL")
+        self.assertEqual(ed.nombre_corto("Renfe Viajeros S.M.E., S.A."), "RENFE VIAJEROS SME SA")
+        self.assertEqual(ed.nombre_corto("Gruas Palli S.A.U."), "GRUAS PALLI SAU")
+
+    def test_texto_por_bloques(self):
+        t = ed.texto_de_html("<div>Uno</div><p>Dos &amp; tres</p><br>cuatro")
+        self.assertEqual(t.split("\n"), ["Uno", "Dos & tres", "cuatro"])
+
+
+class RedBdns(RedFalsa):
+    TERCEROS = {"terceros": [
+        {"id": 1, "descripcion": "B26613679 - BLINDITEX INVENTADA, S.L."},
+        {"id": 2, "descripcion": "12345678Z - INDITEX INVENTADA PERSONA"},
+        {"id": 3, "descripcion": "A58818501 - INDITEX INVENTADA S.A."},
+    ]}
+
+    def descargar(self, url, tipo, max_bytes=600_000):
+        self.preguntas.append(url)
+        return json.dumps(self.TERCEROS) if "bdnstrans" in url else None
+
+
+class Bdns(unittest.TestCase):
+    def test_consultas(self):
+        self.assertEqual(ed.consultas_bdns("Telefónica de España SAU")[0], "TELEFONICA DE ESPA")
+        self.assertEqual(ed.consultas_bdns("Mercadona S.A."), ["MERCADONA"])
+
+    def test_solo_el_bueno(self):
+        cif, nombre, sim = ed.bdns_candidatos(RedBdns(), "Inditex Inventada SA")
+        self.assertEqual(cif, "A58818501")
+
+    def test_ni_trozos_ni_otra_forma(self):
+        # «Blinditex» contiene «inditex», pero no es la palabra; y una SL no es una SA
+        cif, motivo, _ = ed.bdns_candidatos(RedBdns(), "Blinditex Inventada SA")
+        self.assertIsNone(cif)
+
+    def test_propuesta_con_vies(self):
+        import pandas as pd
+        red = RedBdns(vies={"valid": True, "traderNameMatch": "VALID"})
+        df = pd.DataFrame([{"Nombre": "Inditex Inventada SA", "CIF": "", "CP": ""}])
+        op = ed.Opciones(bdns=True)
+        r = ed.enriquecer(df, "P", "p.xlsx", ed.asignar_roles(list(df.columns), {}), red, op)
+        p = next(x for x in r.propuestas if x.columna == "CIF")
+        self.assertEqual((p.propuesto, p.confianza), ("A58818501", "alta"))
+
+    def test_sin_bdns_no_pregunta(self):
+        import pandas as pd
+        red = RedBdns()
+        df = pd.DataFrame([{"Nombre": "Inditex Inventada SA", "CIF": ""}])
+        ed.enriquecer(df, "P", "p.xlsx", ed.asignar_roles(list(df.columns), {}), red, ed.Opciones())
+        self.assertFalse(any("bdnstrans" in u for u in red.preguntas))
 
 
 if __name__ == "__main__":
